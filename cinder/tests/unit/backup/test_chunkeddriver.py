@@ -362,12 +362,17 @@ class ChunkedDriverTestCase(test.TestCase):
         obj_writer = TestObjectWriter('', '')
         with mock.patch.object(self.driver, 'get_object_writer',
                                return_value=obj_writer):
+            obj, prep_data = self.driver._prepare_chunk(
+                self.backup, TEST_DATA, 0, object_meta, extra_metadata)
             self.driver._backup_chunk(self.backup,
                                       self.backup.container,
-                                      TEST_DATA,
-                                      0,
+                                      prep_data,
                                       object_meta,
                                       extra_metadata)
+            self.driver._finalize_chunk(self.backup,
+                                        obj,
+                                        object_meta,
+                                        TEST_DATA)
 
         self.assertEqual(TEST_DATA, obj_writer.written_data)
         self.assertEqual(1, len(object_meta['list']))
@@ -385,12 +390,17 @@ class ChunkedDriverTestCase(test.TestCase):
         obj_writer = TestObjectWriter('', '')
         with mock.patch.object(self.driver, 'get_object_writer',
                                return_value=obj_writer):
+            obj, prep_data = self.driver._prepare_chunk(
+                self.backup, TEST_DATA, 0, object_meta, extra_metadata)
             self.driver._backup_chunk(self.backup,
                                       self.backup.container,
-                                      TEST_DATA,
-                                      0,
+                                      prep_data,
                                       object_meta,
                                       extra_metadata)
+            self.driver._finalize_chunk(self.backup,
+                                        obj,
+                                        object_meta,
+                                        TEST_DATA)
 
             self.driver._finalize_backup(self.backup,
                                          self.backup.container,

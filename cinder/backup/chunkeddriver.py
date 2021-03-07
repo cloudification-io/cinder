@@ -22,6 +22,7 @@
 """
 
 import abc
+import concurrent
 import hashlib
 import json
 import os
@@ -353,30 +354,46 @@ class ChunkedBackupDriver(driver.BackupDriver):
         return (object_meta, object_sha256, extra_metadata, container,
                 volume_size_bytes)
 
-    def _backup_chunk(self, backup, container, data, data_offset,
-                      object_meta, extra_metadata):
-        """Backup data chunk based on the object metadata and offset."""
+    def _prepare_chunk(self, backup, data, data_offset, object_meta,
+                       extra_metadata):
+        """Prepare chunk based on the object metadata and offset."""
         object_prefix = object_meta['prefix']
-        object_list = object_meta['list']
-
         object_id = object_meta['id']
+
         object_name = '%s-%05d' % (object_prefix, object_id)
         obj = {}
         obj[object_name] = {}
         obj[object_name]['offset'] = data_offset
         obj[object_name]['length'] = len(data)
-        LOG.debug('Backing up chunk of data from volume.')
+        LOG.debug('Preparing backup chunk of data from volume.')
         algorithm, output_data = self._prepare_output_data(data)
         obj[object_name]['compression'] = algorithm
+        return obj, output_data
+
+    def _backup_chunk(self, backup, container, output_data, object_meta,
+                      extra_metadata):
+        """Backup data chunk based on the object metadata and offset."""
+        object_prefix = object_meta['prefix']
+        object_id = object_meta['id']
+
+        object_name = '%s-%05d' % (object_prefix, object_id)
         LOG.debug('About to put_object')
         with self._get_object_writer(
                 container, object_name, extra_metadata=extra_metadata
         ) as writer:
             writer.write(output_data)
+
+    def _finalize_chunk(self, backup, obj, object_meta, data):
+        object_prefix = object_meta['prefix']
+        object_list = object_meta['list']
+        object_id = object_meta['id']
+
+        object_name = '%s-%05d' % (object_prefix, object_id)
         md5 = eventlet.tpool.execute(hashlib.md5, data).hexdigest()
         obj[object_name]['md5'] = md5
         LOG.debug('backup MD5 for %(object_name)s: %(md5)s',
                   {'object_name': object_name, 'md5': md5})
+
         object_list.append(obj)
         object_id += 1
         object_meta['list'] = object_list
@@ -542,6 +559,8 @@ class ChunkedBackupDriver(driver.BackupDriver):
 
         counter = 0
         total_block_sent_num = 0
+        workers = os.cpu_count()
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
 
         # There are two mechanisms to send the progress notification.
         # 1. The notifications are periodically sent in a certain interval.
@@ -606,10 +625,14 @@ class ChunkedBackupDriver(driver.BackupDriver):
                             # We've reached the end of extent.
                             extent_end = idx * self.sha_block_size_bytes
                             segment = data[extent_off:extent_end]
-                            self._backup_chunk(backup, container, segment,
-                                               data_offset + extent_off,
-                                               object_meta,
-                                               extra_metadata)
+                            obj, output_data = self._prepare_chunk(
+                                backup, segment, data_offset + extent_off,
+                                object_meta, extra_metadata)
+                            pool.submit(self._backup_chunk, backup,
+                                        container, output_data,
+                                        object_meta, extra_metadata)
+                            self._finalize_chunk(backup, obj,
+                                                 object_meta, data)
                             extent_off = -1
                     shaindex += 1
 
@@ -617,13 +640,19 @@ class ChunkedBackupDriver(driver.BackupDriver):
                 if extent_off != -1:
                     extent_end = len(data)
                     segment = data[extent_off:extent_end]
-                    self._backup_chunk(backup, container, segment,
-                                       data_offset + extent_off,
-                                       object_meta, extra_metadata)
+                    obj, output_data = self._prepare_chunk(
+                        backup, segment, data_offset + extent_off,
+                        object_meta, extra_metadata)
+                    pool.submit(self._backup_chunk, backup, container,
+                                output_data, object_meta, extra_metadata)
+                    self._finalize_chunk(backup, obj, object_meta, data)
                     extent_off = -1
             else:  # Do a full backup.
-                self._backup_chunk(backup, container, data, data_offset,
-                                   object_meta, extra_metadata)
+                obj, output_data = self._prepare_chunk(
+                    backup, data, data_offset, object_meta, extra_metadata)
+                pool.submit(self._backup_chunk, backup, container,
+                            output_data, object_meta, extra_metadata)
+                self._finalize_chunk(backup, obj, object_meta, data)
 
             # Notifications
             total_block_sent_num += self.data_block_num
